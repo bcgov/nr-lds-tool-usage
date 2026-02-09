@@ -1,23 +1,10 @@
 """
-Tool Usage Dashboard - Static HTML Generator
+LDS Tool Usage Dashboard - Static HTML Generator
 Generates a standalone HTML file with interactive Plotly charts.
-Can be hosted on GitHub Pages for free.
-
-To use:
-    1. pip install pandas plotly
-    2. Update PATH to your JSONL logs location
-    3. python lds_usage_dashboard.py
-    4. Upload the generated 'dashboard.html' to GitHub Pages
 
 Reads all monthly JSONL files matching *_summary.jsonl and *_detail.jsonl patterns.
 Detail logs are joined by run_id to enrich error messages beyond what the summary captures.
 
-GitHub Pages Setup:
-    1. Create a repository (or use existing one)
-    2. Go to Settings > Pages
-    3. Set source to 'main' branch and '/ (root)' folder
-    4. Upload dashboard.html (rename to index.html for auto-loading)
-    5. Your dashboard will be at: https://yourusername.github.io/reponame/
 """
 
 import os
@@ -643,7 +630,7 @@ def generate_html(df, metrics):
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Tool Usage Dashboard</title>
+    <title>LDS Tool Usage Dashboard</title>
     <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <style>
         * {{
@@ -815,7 +802,7 @@ def generate_html(df, metrics):
             <span class="status-indicator"></span>
             <span class="subtitle">Data Period: {metrics['date_from']} to {metrics['date_to']}</span>
         </div>
-        <h1>Tool Usage Dashboard</h1>
+        <h1>LDS Tool Usage Dashboard</h1>
     </header>
     
     <!-- USAGE VOLUME -->
@@ -949,7 +936,7 @@ def generate_html(df, metrics):
 # =============================================================================
 if __name__ == '__main__':
     print("\n" + "="*60)
-    print("Tool Usage Dashboard - HTML Generator")
+    print("LDS Tool Usage Dashboard - HTML Generator")
     print("="*60)
     
     # Load summary and detail data
