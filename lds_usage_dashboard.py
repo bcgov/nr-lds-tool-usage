@@ -475,107 +475,149 @@ def create_region_distribution(df):
     )
     return fig
 
-def create_weekly_duration_trend(df):
-    """Line chart showing weekly median duration over time.
-    
-    For non-AST runs, uses the summary duration_seconds (full pipeline time).
-    For AST runs, uses ast_duration_seconds computed from detail log timestamps
-    (actual AST processing time), which is only available for runs where the
-    detail log captured both start and end of the ast_execution stage.
+def create_failure_rate_trend(df):
+    """Weekly failure-rate (%) trend with regional context.
+
+    Layers (bottom to top):
+      1. Shaded band showing the overall average failure rate for reference.
+      2. Faint regional lines so you can spot which regions need attention.
+      3. Bold overall failure-rate line (errors / total runs per week).
+      4. 3-week moving average trend line to smooth out weekly noise.
+
+    Failure rate is computed as:
+        errors_in_week / total_runs_in_week * 100
+
+    Uses the same region → color mapping as the Errors by Region pie chart.
     """
+    import numpy as np
+
+    error_col = 'detail_error_message' if 'detail_error_message' in df.columns else 'error_message'
+
     df_copy = df.copy()
     df_copy['week'] = df_copy['timestamp_start'].dt.to_period('W').apply(lambda r: r.start_time)
-
-    fig = go.Figure()
-
-    # Without AST — pipeline duration
-    no_ast = df_copy[df_copy['ast'] == False].groupby('week')['duration_seconds'].median().reset_index()
-    no_ast.columns = ['week', 'median_duration']
-    fig.add_trace(go.Scatter(
-        x=no_ast['week'], y=no_ast['median_duration'], mode='lines+markers',
-        name='Pipeline (no AST)', line=dict(color=COLORS['chart'][1]),
-        marker=dict(color=COLORS['chart'][1])
-    ))
-
-    # With AST — actual AST duration from detail logs (where available)
-    if 'ast_duration_seconds' in df_copy.columns:
-        with_ast = df_copy[(df_copy['ast'] == True) & (df_copy['ast_completed'] == True)]
-        if not with_ast.empty:
-            with_ast_weekly = with_ast.groupby('week')['ast_duration_seconds'].median().reset_index()
-            with_ast_weekly.columns = ['week', 'median_duration']
-            fig.add_trace(go.Scatter(
-                x=with_ast_weekly['week'], y=with_ast_weekly['median_duration'], mode='lines+markers',
-                name='AST processing', line=dict(color=COLORS['chart'][0]),
-                marker=dict(color=COLORS['chart'][0])
-            ))
-
-    fig.update_layout(**get_chart_layout('Weekly Median Duration Trend'))
-    fig.update_layout(
-        yaxis_title='Median Duration (seconds)',
-        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5),
+    df_copy['has_error'] = (
+        df_copy[error_col].notna()
+        & (df_copy[error_col].astype(str).str.strip().str.len() > 0)
     )
-    return fig
 
-def create_p90_duration_by_region(df):
-    """Bar chart showing P90 duration by region.
-    
-    For non-AST runs: P90 of pipeline duration_seconds.
-    For AST runs: P90 of ast_duration_seconds from detail logs (where available).
-    """
-    regions = df['ast_region'].unique()
+    # --- Overall weekly failure rate ---
+    weekly = df_copy.groupby('week').agg(
+        total=('run_id', 'size'),
+        errors=('has_error', 'sum'),
+    ).reset_index()
+    weekly['failure_rate'] = weekly['errors'] / weekly['total'] * 100
+    weekly = weekly.sort_values('week')
 
-    data = []
-    for region in regions:
-        region_data = df[df['ast_region'] == region]
+    if weekly.empty or weekly['total'].sum() == 0:
+        fig = go.Figure()
+        fig.add_annotation(text="No data available", xref="paper", yref="paper",
+                           x=0.5, y=0.5, showarrow=False)
+        fig.update_layout(**get_chart_layout('Weekly Failure Rate Trend'))
+        return fig
 
-        # Without AST — pipeline duration
-        no_ast = region_data[region_data['ast'] == False]['duration_seconds']
-        if len(no_ast) > 0:
-            data.append({'region': region, 'type': 'Pipeline (no AST)', 'p90_duration': no_ast.quantile(0.90)})
+    # Overall average failure rate (for the reference band)
+    overall_avg = weekly['errors'].sum() / weekly['total'].sum() * 100
 
-        # With AST — actual AST duration from detail logs
-        if 'ast_duration_seconds' in df.columns:
-            with_ast = region_data.loc[
-                (region_data['ast'] == True) & (region_data['ast_completed'] == True),
-                'ast_duration_seconds'
-            ].dropna()
-            if len(with_ast) > 0:
-                data.append({'region': region, 'type': 'AST processing', 'p90_duration': with_ast.quantile(0.90)})
+    # 3-week centred moving average (min_periods=1 so edges aren't NaN)
+    weekly['ma'] = weekly['failure_rate'].rolling(3, center=True, min_periods=1).mean()
 
-    plot_df = pd.DataFrame(data)
+    # --- Per-region weekly failure rate ---
+    region_weekly = df_copy.groupby(['week', 'ast_region']).agg(
+        total=('run_id', 'size'),
+        errors=('has_error', 'sum'),
+    ).reset_index()
+    region_weekly['failure_rate'] = region_weekly['errors'] / region_weekly['total'] * 100
+
+    # Build stable color map: sort regions by total errors descending (matches pie)
+    region_order = (
+        df_copy.loc[df_copy['has_error'], 'ast_region']
+        .value_counts()
+        .index.tolist()
+    )
+    # Include regions that may have zero errors too (for completeness)
+    all_regions = df_copy['ast_region'].unique()
+    for r in all_regions:
+        if r not in region_order:
+            region_order.append(r)
+
+    region_color_map = {
+        region: COLORS['chart'][i % len(COLORS['chart'])]
+        for i, region in enumerate(region_order)
+    }
 
     fig = go.Figure()
 
-    # Add bars for Pipeline (no AST)
-    no_ast_df = plot_df[plot_df['type'] == 'Pipeline (no AST)']
-    fig.add_trace(go.Bar(
-        name='Pipeline (no AST)',
-        y=no_ast_df['region'],
-        x=no_ast_df['p90_duration'],
-        orientation='h',
-        marker_color=COLORS['chart'][1],
-        text=[f"{v:.0f}s" for v in no_ast_df['p90_duration']],
-        textposition='outside'
-    ))
+    # --- Layer 1: Overall average reference band ---
+    fig.add_hrect(
+        y0=max(overall_avg - 2, 0), y1=overall_avg + 2,
+        fillcolor=COLORS['text_muted'], opacity=0.08,
+        line_width=0,
+    )
+    fig.add_hline(
+        y=overall_avg,
+        line_dash='dot', line_color=COLORS['text_muted'], line_width=1,
+        annotation_text=f"Avg {overall_avg:.1f}%",
+        annotation_position='top left',
+        annotation_font=dict(size=11, color=COLORS['text_muted']),
+    )
 
-    # Add bars for AST processing
-    with_ast_df = plot_df[plot_df['type'] == 'AST processing']
-    if not with_ast_df.empty:
-        fig.add_trace(go.Bar(
-            name='AST processing',
-            y=with_ast_df['region'],
-            x=with_ast_df['p90_duration'],
-            orientation='h',
-            marker_color=COLORS['chart'][0],
-            text=[f"{v:.0f}s" for v in with_ast_df['p90_duration']],
-            textposition='outside'
+    # --- Layer 2: Faint regional lines ---
+    for region in region_order:
+        grp = region_weekly[region_weekly['ast_region'] == region].sort_values('week')
+        if grp.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=grp['week'], y=grp['failure_rate'],
+            mode='lines',
+            name=region,
+            line=dict(color=region_color_map[region], width=1.7),
+            opacity=0.5,
+            hovertemplate=(
+                f"<b>{region}</b><br>"
+                "Week: %{x|%b %d}<br>"
+                "Failure rate: %{y:.1f}%<br>"
+                "<extra></extra>"
+            ),
         ))
 
-    fig.update_layout(**get_chart_layout('P90 Duration by Region', height=320))
+    # --- Layer 3: Bold overall failure rate ---
+    fig.add_trace(go.Scatter(
+        x=weekly['week'], y=weekly['failure_rate'],
+        mode='lines+markers',
+        name='Overall',
+        line=dict(color=COLORS['text'], width=3),
+        marker=dict(color=COLORS['text'], size=6),
+        hovertemplate=(
+            "<b>Overall</b><br>"
+            "Week: %{x|%b %d}<br>"
+            "Failure rate: %{y:.1f}%<br>"
+            "<extra></extra>"
+        ),
+    ))
+
+    # --- Layer 4: Moving average trend line ---
+    fig.add_trace(go.Scatter(
+        x=weekly['week'], y=weekly['ma'],
+        mode='lines',
+        name='3-wk trend',
+        line=dict(color=COLORS['accent'], width=2.5, dash='dash'),
+        hovertemplate=(
+            "<b>3-week moving avg</b><br>"
+            "Week: %{x|%b %d}<br>"
+            "Trend: %{y:.1f}%<br>"
+            "<extra></extra>"
+        ),
+    ))
+
+    fig.update_layout(**get_chart_layout('Weekly Failure Rate Trend', height=350))
     fig.update_layout(
-        barmode='group',
+        yaxis_title='Failure Rate (%)',
+        yaxis=dict(
+            gridcolor='rgba(255,255,255,0.1)',
+            zerolinecolor='rgba(255,255,255,0.1)',
+            rangemode='tozero',
+        ),
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5),
-        xaxis_title='P90 Duration (seconds)'
     )
     return fig
 
@@ -760,8 +802,7 @@ def generate_html(df, metrics):
         'user_dist_gis': create_user_distribution_gis(df).to_html(full_html=False, include_plotlyjs=False),
         'user_dist_non_gis': create_user_distribution_non_gis(df).to_html(full_html=False, include_plotlyjs=False),
         'region_dist': create_region_distribution(df).to_html(full_html=False, include_plotlyjs=False),
-        'weekly_duration': create_weekly_duration_trend(df).to_html(full_html=False, include_plotlyjs=False),
-        'p90_region': create_p90_duration_by_region(df).to_html(full_html=False, include_plotlyjs=False),
+        'failure_rate_trend': create_failure_rate_trend(df).to_html(full_html=False, include_plotlyjs=False),
         'status_dist': create_status_distribution(df).to_html(full_html=False, include_plotlyjs=False),
         'error_msgs': create_error_messages(df).to_html(full_html=False, include_plotlyjs=False),
         'error_region': create_error_by_region(df).to_html(full_html=False, include_plotlyjs=False),
@@ -993,45 +1034,24 @@ def generate_html(df, metrics):
         </div>
     </section>
     
-    <!-- PERFORMANCE -->
+    <!-- PERFORMANCE & RELIABILITY -->
     <section>
-        <h2 class="section-header">Performance</h2>
+        <h2 class="section-header">Performance & Reliability</h2>
         <div class="metrics-grid">
             <div class="metric-card">
-                <div class="label">Median Pipeline</div>
+                <div class="label">Median LDS Time</div>
                 <div class="value">{format_duration(metrics['median_duration_without_ast'])}</div>
                 <div class="card-subtitle">Runs without AST</div>
             </div>
             <div class="metric-card">
                 <div class="label">Median AST Time</div>
                 <div class="value">{format_duration(metrics['median_duration_with_ast'])}</div>
-                <div class="card-subtitle">{metrics['ast_completed_count']}/{metrics['ast_requested_count']} AST runs with timing</div>
+                <div class="card-subtitle">Runs with AST</div>
             </div>
-            <div class="metric-card">
-                <div class="label">P90 Duration</div>
-                <div class="value">{format_duration(metrics['p90_duration'])}</div>
-                <div class="card-subtitle">90th percentile (all runs)</div>
-            </div>
-        </div>
-        <div class="charts-grid">
-            <div class="chart-container">{charts['weekly_duration']}</div>
-            <div class="chart-container">{charts['p90_region']}</div>
-        </div>
-    </section>
-    
-    <!-- RELIABILITY -->
-    <section>
-        <h2 class="section-header">Reliability</h2>
-        <div class="metrics-grid">
             <div class="metric-card">
                 <div class="label">Success Rate</div>
                 <div class="value">{metrics['success_rate']:.1f}%</div>
                 <div class="card-subtitle">Completed runs</div>
-            </div>
-            <div class="metric-card">
-                <div class="label">Error Rate</div>
-                <div class="value">{metrics['error_rate']:.1f}%</div>
-                <div class="card-subtitle">Runs with errors</div>
             </div>
             <div class="metric-card">
                 <div class="label">Warning Rate</div>
@@ -1044,7 +1064,10 @@ def generate_html(df, metrics):
                 <div class="card-subtitle">Unique errors</div>
             </div>
         </div>
-        <div class="charts-grid">
+        <div class="charts-grid" style="margin-top: 16px;">
+            <div class="chart-container" style="grid-column: span 2;">{charts['failure_rate_trend']}</div>
+        </div>
+        <div class="charts-grid" style="margin-top: 16px;">
             <div class="chart-container">{charts['status_dist']}</div>
             <div class="chart-container">{charts['error_region']}</div>
         </div>
