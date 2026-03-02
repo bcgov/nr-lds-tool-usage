@@ -1,1 +1,1 @@
-A usage statistics dashboard for the Legal Description Schedule (LDS) tool.
+DELETE this repo.
